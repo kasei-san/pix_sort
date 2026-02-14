@@ -3,9 +3,11 @@
 ディレクトリ内のPNG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
 """
 
+import hashlib
 import json
 import os
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk
@@ -17,6 +19,113 @@ LABEL_HEIGHT = 20
 AUTO_SCROLL_ZONE = 40
 AUTO_SCROLL_INTERVAL = 30
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+CACHE_MAX_BYTES = 200 * 1024 * 1024  # 200MB
+POLL_INTERVAL_MS = 16  # ~60fps ポーリング
+
+
+def _cache_key(abs_path, mtime, file_size):
+    """キャッシュキーを生成（sha256ハッシュ）"""
+    raw = f"{abs_path}|{mtime}|{file_size}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_get(cache_dir, key, thumb_size):
+    """キャッシュからサムネイルを読み込む。ヒットすればPIL Image、ミスならNone"""
+    path = os.path.join(cache_dir, f"{key}_{thumb_size}.jpg")
+    if not os.path.exists(path):
+        return None
+    try:
+        img = Image.open(path)
+        img.load()
+        return img
+    except Exception:
+        return None
+
+
+def _cache_put(cache_dir, key, thumb_size, pil_image):
+    """サムネイルをキャッシュに保存（JPEG quality=90）"""
+    try:
+        img = pil_image
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (43, 43, 43))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        path = os.path.join(cache_dir, f"{key}_{thumb_size}.jpg")
+        img.save(path, "JPEG", quality=90)
+    except Exception:
+        pass
+
+
+def _cleanup_cache(cache_dir, max_bytes):
+    """キャッシュディレクトリが max_bytes を超えていたら古いファイルから削除"""
+    try:
+        files = []
+        for name in os.listdir(cache_dir):
+            if not name.endswith(".jpg"):
+                continue
+            fp = os.path.join(cache_dir, name)
+            st = os.stat(fp)
+            files.append((fp, st.st_size, st.st_mtime))
+    except Exception:
+        return
+
+    total = sum(size for _, size, _ in files)
+    if total <= max_bytes:
+        return
+
+    # mtime が古い順にソートして削除
+    files.sort(key=lambda x: x[2])
+    for fp, size, _ in files:
+        if total <= max_bytes:
+            break
+        try:
+            os.remove(fp)
+            total -= size
+        except Exception:
+            pass
+
+
+def _process_image_worker(path, thumb_sizes, cache_dir):
+    """ワーカースレッドでサムネイルを生成（PIL Imageを返す）"""
+    filename = os.path.basename(path)
+    try:
+        stat = os.stat(path)
+        key = _cache_key(os.path.abspath(path), stat.st_mtime, stat.st_size)
+    except Exception:
+        key = None
+
+    pil_images = []
+    source_img = None
+
+    for size in thumb_sizes:
+        cached = _cache_get(cache_dir, key, size) if key else None
+        if cached is not None:
+            pil_images.append(cached)
+            continue
+
+        # ソース画像を遅延読み込み（初回のみ）
+        if source_img is None:
+            try:
+                source_img = Image.open(path)
+                source_img.load()
+            except Exception:
+                source_img = False  # 読み込み失敗フラグ
+
+        if source_img is False:
+            pil_images.append(Image.new("RGB", (size, size), (80, 80, 80)))
+            continue
+
+        img = source_img.copy()
+        img.thumbnail((size, size), Image.LANCZOS)
+        pil_images.append(img)
+
+        if key:
+            _cache_put(cache_dir, key, size, img)
+
+    return (path, filename, pil_images)
 
 
 class ImageSorterApp:
@@ -35,8 +144,12 @@ class ImageSorterApp:
         self.drag_ghost = None
         self._auto_scroll_after_id = None
         self._loading = False
-        self._load_queue = []
-        self._load_index = 0
+        self._load_cancelled = False
+        self._executor = None
+        self._futures = {}
+        self._results = None
+        self._completed_count = 0
+        self._total_count = 0
         self._viewer_win = None
         self._split_mode = False
         self._active_canvas = None
@@ -44,6 +157,10 @@ class ImageSorterApp:
 
         self._build_ui()
         self._setup_folder_dnd()
+
+        # キャッシュクリーンアップ
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        _cleanup_cache(CACHE_DIR, CACHE_MAX_BYTES)
 
         # 前回フォルダの自動読み込み
         last_folder = self._load_config()
@@ -190,17 +307,27 @@ class ImageSorterApp:
         self._load_images()
 
     def _load_images(self):
+        # 既存の executor があればシャットダウン
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+            self._futures.clear()
+
         self.images.clear()
-        self._load_queue = sorted(
+        files = sorted(
             f for f in os.listdir(self.directory)
             if f.lower().endswith(".png")
         )
-        self._load_index = 0
 
-        if not self._load_queue:
+        if not files:
             self.btn_rename.config(state=tk.DISABLED)
             self._draw_grid()
             return
+
+        total = len(files)
+        self._results = [None] * total
+        self._completed_count = 0
+        self._total_count = total
 
         # 読み込み中状態
         self._loading = True
@@ -208,8 +335,20 @@ class ImageSorterApp:
         self.btn_select.config(state=tk.DISABLED)
         self.btn_rename.config(state=tk.DISABLED)
         self.btn_cancel.pack()
-        self._draw_progress(0, len(self._load_queue))
-        self.root.after(1, self._load_next_image)
+        self._draw_progress(0, total)
+
+        # ThreadPoolExecutor で並列処理
+        workers = max(1, (os.cpu_count() or 4) - 1)
+        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self._futures = {}
+        for idx, f in enumerate(files):
+            path = os.path.join(self.directory, f)
+            future = self._executor.submit(
+                _process_image_worker, path, THUMB_SIZES, CACHE_DIR
+            )
+            self._futures[future] = idx
+
+        self.root.after(POLL_INTERVAL_MS, self._poll_futures)
 
     def _cancel_loading(self):
         self._load_cancelled = True
@@ -219,11 +358,18 @@ class ImageSorterApp:
         self._loading = False
         self.btn_cancel.pack_forget()
         self.btn_select.config(state=tk.NORMAL)
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+        self._futures.clear()
 
-    def _load_next_image(self):
+    def _poll_futures(self):
         if self._load_cancelled:
-            # キャンセル: 読み込み済みデータを破棄して初期状態に戻す
+            # キャンセル: 全Future取消→状態リセット
+            for future in self._futures:
+                future.cancel()
             self.images.clear()
+            self._results = None
             self.directory = None
             self.lbl_dir.config(text="(未選択)")
             self.btn_rename.config(state=tk.DISABLED)
@@ -232,26 +378,50 @@ class ImageSorterApp:
             self.canvas_r.delete("all")
             return
 
-        if self._load_index >= len(self._load_queue):
-            # 読み込み完了
+        # 完了したFutureを回収（1回のポーリングで最大10個）
+        done_futures = [f for f in self._futures if f.done()]
+        batch = done_futures[:10]
+
+        for future in batch:
+            idx = self._futures.pop(future)
+            try:
+                path, filename, pil_images = future.result()
+                # PIL → ImageTk.PhotoImage 変換（メインスレッド）
+                thumbs = [ImageTk.PhotoImage(img) for img in pil_images]
+                self._results[idx] = {
+                    "path": path,
+                    "name": filename,
+                    "thumbs": thumbs,
+                    "thumb": thumbs[self._thumb_size_idx],
+                }
+            except Exception:
+                # エラー時はプレースホルダー
+                placeholder = [
+                    ImageTk.PhotoImage(Image.new("RGB", (s, s), (80, 80, 80)))
+                    for s in THUMB_SIZES
+                ]
+                self._results[idx] = {
+                    "path": "",
+                    "name": "error",
+                    "thumbs": placeholder,
+                    "thumb": placeholder[self._thumb_size_idx],
+                }
+            self._completed_count += 1
+
+        if batch:
+            self._draw_progress(self._completed_count, self._total_count)
+
+        # 全完了チェック
+        if self._completed_count >= self._total_count:
+            self.images = [r for r in self._results if r is not None]
+            self._results = None
             self.btn_rename.config(state=tk.NORMAL if self.images else tk.DISABLED)
             self._finish_loading()
             self._draw_grid()
             return
 
-        f = self._load_queue[self._load_index]
-        path = os.path.join(self.directory, f)
-        thumbs = self._make_thumbnails(path)
-        self.images.append({
-            "path": path,
-            "name": f,
-            "thumbs": thumbs,
-            "thumb": thumbs[self._thumb_size_idx],
-        })
-        self._load_index += 1
-
-        self._draw_progress(self._load_index, len(self._load_queue))
-        self.root.after(1, self._load_next_image)
+        # 次のポーリング
+        self.root.after(POLL_INTERVAL_MS, self._poll_futures)
 
     def _draw_progress(self, current, total):
         self.canvas.delete("all")
@@ -281,24 +451,6 @@ class ImageSorterApp:
         self.canvas.create_text(cw // 2, by + bar_h + 16,
                                 text=f"{current}/{total} ({pct}%)",
                                 fill="white", font=("Consolas", 10))
-
-    def _make_thumbnails(self, path):
-        """3サイズ分のサムネイルを事前生成"""
-        try:
-            pil = Image.open(path)
-            pil.load()
-        except Exception:
-            pil = None
-
-        result = []
-        for size in THUMB_SIZES:
-            if pil is not None:
-                img = pil.copy()
-                img.thumbnail((size, size), Image.LANCZOS)
-            else:
-                img = Image.new("RGB", (size, size), (80, 80, 80))
-            result.append(ImageTk.PhotoImage(img))
-        return result
 
     # ── Grid drawing ────────────────────────────────────────
 
