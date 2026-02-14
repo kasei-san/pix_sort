@@ -1,0 +1,604 @@
+"""PixSort — 画像並び替え＆リネームツール
+
+ディレクトリ内のPNG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
+"""
+
+import json
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from PIL import Image, ImageTk
+
+THUMB_SIZES = (80, 150, 250)  # 小・中・大
+THUMB_SIZE_DEFAULT_INDEX = 1  # 中（150）
+CELL_PADDING = 10
+LABEL_HEIGHT = 20
+AUTO_SCROLL_ZONE = 40
+AUTO_SCROLL_INTERVAL = 30
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+class ImageSorterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PixSort — 画像並び替え＆リネーム")
+        self.root.geometry("900x700")
+        self.root.minsize(400, 300)
+
+        self.directory = None
+        # list of {"path": str, "name": str, "thumbs": [ImageTk x3], "thumb": ImageTk}
+        self.images = []
+        self._thumb_size_idx = THUMB_SIZE_DEFAULT_INDEX
+        self.drag_index = None
+        self.insert_index = None
+        self.drag_ghost = None
+        self._auto_scroll_after_id = None
+        self._loading = False
+        self._load_queue = []
+        self._load_index = 0
+        self._viewer_win = None
+
+        self._build_ui()
+        self._setup_folder_dnd()
+
+        # 前回フォルダの自動読み込み
+        last_folder = self._load_config()
+        if last_folder and os.path.isdir(last_folder):
+            self.root.after(100, lambda: self._open_folder(last_folder))
+
+    @property
+    def _thumb_size(self):
+        return THUMB_SIZES[self._thumb_size_idx]
+
+    # ── Config persistence ────────────────────────────────
+
+    def _load_config(self):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("last_folder")
+        except Exception:
+            return None
+
+    def _save_config(self):
+        data = {}
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+        data["last_folder"] = self.directory
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _build_ui(self):
+        # Top bar
+        top = tk.Frame(self.root)
+        top.pack(fill=tk.X, padx=8, pady=6)
+
+        self.btn_select = tk.Button(top, text="フォルダ選択", command=self._select_folder)
+        self.btn_select.pack(side=tk.LEFT)
+
+        self.lbl_dir = tk.Label(top, text="(未選択)", anchor=tk.W)
+        self.lbl_dir.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
+
+        # Scrollable canvas area
+        mid = tk.Frame(self.root)
+        mid.pack(fill=tk.BOTH, expand=True, padx=8)
+
+        self.canvas = tk.Canvas(mid, bg="#2b2b2b", highlightthickness=0)
+        self.scrollbar = tk.Scrollbar(mid, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_drop)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+
+        # Bottom bar
+        bottom = tk.Frame(self.root)
+        bottom.pack(fill=tk.X, padx=8, pady=6)
+
+        self.btn_rename = tk.Button(
+            bottom, text="リネーム実行", command=self._do_rename, state=tk.DISABLED
+        )
+        self.btn_rename.pack()
+
+        self.btn_cancel = tk.Button(bottom, text="キャンセル", command=self._cancel_loading)
+        # 初期状態では非表示（読み込み中のみpack）
+
+    # ── Folder D&D from Explorer ──────────────────────────────
+
+    def _setup_folder_dnd(self):
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind("<<Drop>>", self._on_folder_drop)
+
+    def _on_folder_drop(self, event):
+        path = event.data.strip()
+        # tkdnd wraps paths with spaces in {}
+        if path.startswith("{") and path.endswith("}"):
+            path = path[1:-1]
+        if os.path.isdir(path):
+            self._open_folder(path)
+
+    # ── Folder / image loading ──────────────────────────────
+
+    def _select_folder(self):
+        d = filedialog.askdirectory(title="画像フォルダを選択")
+        if not d:
+            return
+        self._open_folder(d)
+
+    def _open_folder(self, path):
+        self.directory = path
+        self.lbl_dir.config(text=path)
+        self._save_config()
+        self._load_images()
+
+    def _load_images(self):
+        self.images.clear()
+        self._load_queue = sorted(
+            f for f in os.listdir(self.directory)
+            if f.lower().endswith(".png")
+        )
+        self._load_index = 0
+
+        if not self._load_queue:
+            self.btn_rename.config(state=tk.DISABLED)
+            self._draw_grid()
+            return
+
+        # 読み込み中状態
+        self._loading = True
+        self._load_cancelled = False
+        self.btn_select.config(state=tk.DISABLED)
+        self.btn_rename.config(state=tk.DISABLED)
+        self.btn_cancel.pack()
+        self._draw_progress(0, len(self._load_queue))
+        self.root.after(1, self._load_next_image)
+
+    def _cancel_loading(self):
+        self._load_cancelled = True
+
+    def _finish_loading(self):
+        """読み込み完了・キャンセル共通の後処理"""
+        self._loading = False
+        self.btn_cancel.pack_forget()
+        self.btn_select.config(state=tk.NORMAL)
+
+    def _load_next_image(self):
+        if self._load_cancelled:
+            # キャンセル: 読み込み済みデータを破棄して初期状態に戻す
+            self.images.clear()
+            self.directory = None
+            self.lbl_dir.config(text="(未選択)")
+            self.btn_rename.config(state=tk.DISABLED)
+            self._finish_loading()
+            self.canvas.delete("all")
+            return
+
+        if self._load_index >= len(self._load_queue):
+            # 読み込み完了
+            self.btn_rename.config(state=tk.NORMAL if self.images else tk.DISABLED)
+            self._finish_loading()
+            self._draw_grid()
+            return
+
+        f = self._load_queue[self._load_index]
+        path = os.path.join(self.directory, f)
+        thumbs = self._make_thumbnails(path)
+        self.images.append({
+            "path": path,
+            "name": f,
+            "thumbs": thumbs,
+            "thumb": thumbs[self._thumb_size_idx],
+        })
+        self._load_index += 1
+
+        self._draw_progress(self._load_index, len(self._load_queue))
+        self.root.after(1, self._load_next_image)
+
+    def _draw_progress(self, current, total):
+        self.canvas.delete("all")
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 10 or ch < 10:
+            return
+
+        bar_w = min(300, cw - 60)
+        bar_h = 24
+        bx = (cw - bar_w) // 2
+        by = ch // 2 - bar_h // 2
+
+        # 背景バー
+        self.canvas.create_rectangle(bx, by, bx + bar_w, by + bar_h,
+                                     fill="#444444", outline="#666666")
+        # 進捗バー
+        if total > 0:
+            ratio = current / total
+            fill_w = int(bar_w * ratio)
+            if fill_w > 0:
+                self.canvas.create_rectangle(bx, by, bx + fill_w, by + bar_h,
+                                             fill="#00bfff", outline="")
+
+        # パーセント表示
+        pct = int(current / total * 100) if total > 0 else 0
+        self.canvas.create_text(cw // 2, by + bar_h + 16,
+                                text=f"{current}/{total} ({pct}%)",
+                                fill="white", font=("Consolas", 10))
+
+    def _make_thumbnails(self, path):
+        """3サイズ分のサムネイルを事前生成"""
+        try:
+            pil = Image.open(path)
+            pil.load()
+        except Exception:
+            pil = None
+
+        result = []
+        for size in THUMB_SIZES:
+            if pil is not None:
+                img = pil.copy()
+                img.thumbnail((size, size), Image.LANCZOS)
+            else:
+                img = Image.new("RGB", (size, size), (80, 80, 80))
+            result.append(ImageTk.PhotoImage(img))
+        return result
+
+    # ── Grid drawing ────────────────────────────────────────
+
+    def _calc_columns(self):
+        w = self.canvas.winfo_width()
+        cell = self._thumb_size + CELL_PADDING * 2
+        return max(1, w // cell)
+
+    def _draw_grid(self):
+        self.canvas.delete("all")
+        if not self.images:
+            self.canvas.config(scrollregion=(0, 0, 0, 0))
+            return
+
+        ts = self._thumb_size
+        cols = self._calc_columns()
+        cell_w = ts + CELL_PADDING * 2
+        cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
+
+        for i, item in enumerate(self.images):
+            row, col = divmod(i, cols)
+            x = col * cell_w + CELL_PADDING + ts // 2
+            y = row * cell_h + CELL_PADDING + ts // 2
+
+            self.canvas.create_image(x, y, image=item["thumb"], tags=(f"img_{i}", "thumb"))
+            self.canvas.create_text(
+                x, y + ts // 2 + 4,
+                text=item["name"], fill="white", font=("Consolas", 9),
+                tags=(f"lbl_{i}", "label"),
+            )
+
+            # Draw insert marker if dragging
+            if self.insert_index is not None and i == self.insert_index and i != self.drag_index:
+                mx = col * cell_w + 1
+                my = row * cell_h + CELL_PADDING
+                self.canvas.create_line(
+                    mx, my, mx, my + ts,
+                    fill="#00bfff", width=3, tags="marker",
+                )
+
+        # Insert marker at end
+        if self.insert_index is not None and self.insert_index == len(self.images):
+            i_end = len(self.images)
+            row, col = divmod(i_end, cols)
+            mx = col * cell_w + 1
+            my = row * cell_h + CELL_PADDING
+            self.canvas.create_line(
+                mx, my, mx, my + ts,
+                fill="#00bfff", width=3, tags="marker",
+            )
+
+        total_rows = (len(self.images) + cols - 1) // cols
+        total_h = total_rows * cell_h + CELL_PADDING
+        self.canvas.config(scrollregion=(0, 0, cols * cell_w, total_h))
+
+    def _on_canvas_resize(self, event):
+        if not self._loading:
+            self._draw_grid()
+
+    def _on_mousewheel(self, event):
+        if event.state & 0x4:  # Ctrl held
+            return
+        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+    def _on_ctrl_mousewheel(self, event):
+        if self._loading or not self.images:
+            return
+        if event.delta > 0:
+            new_idx = min(self._thumb_size_idx + 1, len(THUMB_SIZES) - 1)
+        else:
+            new_idx = max(self._thumb_size_idx - 1, 0)
+        if new_idx == self._thumb_size_idx:
+            return
+        self._thumb_size_idx = new_idx
+        for item in self.images:
+            item["thumb"] = item["thumbs"][self._thumb_size_idx]
+        self._draw_grid()
+
+    # ── Drag & Drop ─────────────────────────────────────────
+
+    def _hit_index(self, x, y):
+        """canvas座標からグリッドインデックスを返す"""
+        ts = self._thumb_size
+        cols = self._calc_columns()
+        cell_w = ts + CELL_PADDING * 2
+        cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
+
+        col = int(x // cell_w)
+        row = int(y // cell_h)
+        idx = row * cols + col
+
+        if 0 <= idx < len(self.images):
+            return idx
+        return None
+
+    def _insert_position(self, x, y):
+        """ドロップ位置から挿入インデックスを算出"""
+        ts = self._thumb_size
+        cols = self._calc_columns()
+        cell_w = ts + CELL_PADDING * 2
+        cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
+
+        col_f = x / cell_w
+        row = int(y // cell_h)
+        col = int(col_f)
+
+        # セルの右半分なら次のインデックスに挿入
+        frac = col_f - col
+        idx = row * cols + col
+        if frac > 0.5:
+            idx += 1
+
+        return max(0, min(idx, len(self.images)))
+
+    def _on_press(self, event):
+        if not self.images or self._loading:
+            return
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        idx = self._hit_index(cx, cy)
+        if idx is not None:
+            self.drag_index = idx
+            # Create ghost overlay
+            item = self.images[idx]
+            self.drag_ghost = self.canvas.create_image(
+                cx, cy, image=item["thumb"], tags="ghost"
+            )
+            self.canvas.itemconfigure(self.drag_ghost, state=tk.NORMAL)
+            # Dim the original
+            self.canvas.itemconfigure(f"img_{idx}", state=tk.HIDDEN)
+
+    def _on_drag(self, event):
+        if self.drag_index is None:
+            return
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+
+        # Move ghost
+        if self.drag_ghost:
+            self.canvas.coords(self.drag_ghost, cx, cy)
+
+        # Update insert marker
+        new_insert = self._insert_position(cx, cy)
+        if new_insert != self.insert_index:
+            self.insert_index = new_insert
+            self._draw_grid()
+            # Re-create ghost on top after redraw
+            item = self.images[self.drag_index]
+            self.drag_ghost = self.canvas.create_image(
+                cx, cy, image=item["thumb"], tags="ghost"
+            )
+
+        # 自動スクロール判定
+        self._check_auto_scroll(event.y)
+
+    def _check_auto_scroll(self, widget_y):
+        """ウィンドウ座標でエッジ判定し、自動スクロールを開始/停止"""
+        canvas_h = self.canvas.winfo_height()
+
+        if widget_y < AUTO_SCROLL_ZONE:
+            # 上端付近 → 上方向スクロール
+            distance = max(1, AUTO_SCROLL_ZONE - widget_y)
+            self._scroll_direction = -1
+            self._scroll_speed = 1 + distance // 15
+        elif widget_y > canvas_h - AUTO_SCROLL_ZONE:
+            # 下端付近 → 下方向スクロール
+            distance = max(1, widget_y - (canvas_h - AUTO_SCROLL_ZONE))
+            self._scroll_direction = 1
+            self._scroll_speed = 1 + distance // 15
+        else:
+            self._cancel_auto_scroll()
+            return
+
+        # タイマーが未起動なら開始
+        if self._auto_scroll_after_id is None:
+            self._auto_scroll_tick()
+
+    def _auto_scroll_tick(self):
+        """タイマーによる連続スクロール"""
+        if self.drag_index is None:
+            self._cancel_auto_scroll()
+            return
+
+        self.canvas.yview_scroll(self._scroll_direction * self._scroll_speed, "units")
+        self._auto_scroll_after_id = self.root.after(
+            AUTO_SCROLL_INTERVAL, self._auto_scroll_tick
+        )
+
+    def _cancel_auto_scroll(self):
+        if self._auto_scroll_after_id is not None:
+            self.root.after_cancel(self._auto_scroll_after_id)
+            self._auto_scroll_after_id = None
+
+    def _on_drop(self, event):
+        self._cancel_auto_scroll()
+
+        if self.drag_index is None:
+            self.insert_index = None
+            return
+
+        if self.insert_index is not None:
+            src = self.drag_index
+            dst = self.insert_index
+            if dst != src and dst != src + 1:
+                item = self.images.pop(src)
+                if dst > src:
+                    dst -= 1
+                self.images.insert(dst, item)
+
+        self.drag_index = None
+        self.insert_index = None
+        self.drag_ghost = None
+        self._draw_grid()
+
+    # ── Image Viewer ─────────────────────────────────────────
+
+    def _on_double_click(self, event):
+        if not self.images or self._loading:
+            return
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        idx = self._hit_index(cx, cy)
+        if idx is not None:
+            self._open_viewer(idx)
+
+    def _open_viewer(self, index):
+        # 既存ビューアがあれば閉じる
+        if self._viewer_win is not None:
+            try:
+                self._viewer_win.destroy()
+            except Exception:
+                pass
+
+        self._viewer_index = index
+        win = tk.Toplevel(self.root)
+        win.title("PixSort — ビューア")
+        win.configure(bg="#000000")
+        self._viewer_win = win
+        self._viewer_photo = None  # 参照保持用
+
+        self._viewer_canvas = tk.Canvas(win, bg="#000000", highlightthickness=0)
+        self._viewer_canvas.pack(fill=tk.BOTH, expand=True)
+
+        win.bind("<Key>", self._viewer_on_key)
+        win.protocol("WM_DELETE_WINDOW", self._close_viewer)
+        win.focus_set()
+
+        self._viewer_show_image(index)
+
+    def _viewer_show_image(self, index):
+        if not (0 <= index < len(self.images)):
+            return
+        self._viewer_index = index
+        path = self.images[index]["path"]
+
+        try:
+            img = Image.open(path)
+        except Exception:
+            return
+
+        # 画面サイズに収まるようリサイズ
+        screen_w = self.root.winfo_screenwidth() - 80
+        screen_h = self.root.winfo_screenheight() - 120
+        img_w, img_h = img.size
+
+        if img_w > screen_w or img_h > screen_h:
+            ratio = min(screen_w / img_w, screen_h / img_h)
+            new_w = int(img_w * ratio)
+            new_h = int(img_h * ratio)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        else:
+            new_w, new_h = img_w, img_h
+
+        self._viewer_photo = ImageTk.PhotoImage(img)
+
+        win = self._viewer_win
+        win.geometry(f"{new_w}x{new_h}")
+        win.title(f"PixSort — {self.images[index]['name']}")
+
+        self._viewer_canvas.delete("all")
+        self._viewer_canvas.create_image(
+            new_w // 2, new_h // 2, image=self._viewer_photo
+        )
+
+    def _viewer_on_key(self, event):
+        if event.keysym == "Escape":
+            self._close_viewer()
+        elif event.keysym == "Left":
+            if self._viewer_index > 0:
+                self._viewer_show_image(self._viewer_index - 1)
+        elif event.keysym == "Right":
+            if self._viewer_index < len(self.images) - 1:
+                self._viewer_show_image(self._viewer_index + 1)
+
+    def _close_viewer(self):
+        if self._viewer_win is not None:
+            self._viewer_win.destroy()
+            self._viewer_win = None
+            self._viewer_photo = None
+
+    # ── Rename ──────────────────────────────────────────────
+
+    def _do_rename(self):
+        if not self.images:
+            return
+
+        count = len(self.images)
+        max_num = count * 10
+        if max_num < 1000:
+            digits = 3
+        else:
+            digits = len(str(max_num))
+
+        # Confirm
+        msg = f"{count} 個の画像を連番({str(10).zfill(digits)}, {str(20).zfill(digits)}, ...)でリネームするのだ。\n実行する？"
+        if not messagebox.askyesno("確認", msg):
+            return
+
+        # Phase 1: rename to temp names
+        temp_map = []
+        for i, item in enumerate(self.images):
+            old = item["path"]
+            temp_name = f"__temp_{i:06d}.png"
+            temp_path = os.path.join(self.directory, temp_name)
+            os.rename(old, temp_path)
+            temp_map.append(temp_path)
+
+        # Phase 2: rename to final names
+        for i, temp_path in enumerate(temp_map):
+            num = (i + 1) * 10
+            new_name = f"{str(num).zfill(digits)}.png"
+            new_path = os.path.join(self.directory, new_name)
+            os.rename(temp_path, new_path)
+            self.images[i]["path"] = new_path
+            self.images[i]["name"] = new_name
+
+        self._draw_grid()
+        messagebox.showinfo("完了", f"{count} 個のファイルをリネームしたのだ。")
+
+
+def main():
+    root = TkinterDnD.Tk()
+    ImageSorterApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
