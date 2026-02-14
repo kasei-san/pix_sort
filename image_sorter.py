@@ -38,6 +38,9 @@ class ImageSorterApp:
         self._load_queue = []
         self._load_index = 0
         self._viewer_win = None
+        self._split_mode = False
+        self._active_canvas = None
+        self._drag_canvas = None
 
         self._build_ui()
         self._setup_folder_dnd()
@@ -86,24 +89,44 @@ class ImageSorterApp:
         self.lbl_dir = tk.Label(top, text="(未選択)", anchor=tk.W)
         self.lbl_dir.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
 
+        self.btn_split = tk.Button(top, text="分割", command=self._toggle_split)
+        self.btn_split.pack(side=tk.RIGHT)
+
         # Scrollable canvas area
         mid = tk.Frame(self.root)
         mid.pack(fill=tk.BOTH, expand=True, padx=8)
 
-        self.canvas = tk.Canvas(mid, bg="#2b2b2b", highlightthickness=0)
-        self.scrollbar = tk.Scrollbar(mid, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        # Left panel
+        self._panel_l = tk.Frame(mid)
+        self._panel_l.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        self.canvas = tk.Canvas(self._panel_l, bg="#2b2b2b", highlightthickness=0)
+        self.scrollbar = tk.Scrollbar(self._panel_l, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.canvas.bind("<ButtonPress-1>", self._on_press)
-        self.canvas.bind("<B1-Motion>", self._on_drag)
-        self.canvas.bind("<ButtonRelease-1>", self._on_drop)
-        self.canvas.bind("<Configure>", self._on_canvas_resize)
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
-        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        # Divider (hidden initially)
+        self._divider = tk.Frame(mid, width=2, bg="#555555")
+
+        # Right panel (hidden initially)
+        self._panel_r = tk.Frame(mid)
+
+        self.canvas_r = tk.Canvas(self._panel_r, bg="#2b2b2b", highlightthickness=0)
+        self.scrollbar_r = tk.Scrollbar(self._panel_r, orient=tk.VERTICAL, command=self.canvas_r.yview)
+        self.canvas_r.configure(yscrollcommand=self.scrollbar_r.set)
+        self.scrollbar_r.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_r.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Bind events to both canvases
+        for c in (self.canvas, self.canvas_r):
+            c.bind("<ButtonPress-1>", lambda e, cv=c: self._on_press(e, cv))
+            c.bind("<B1-Motion>", self._on_drag)
+            c.bind("<ButtonRelease-1>", self._on_drop)
+            c.bind("<Configure>", self._on_canvas_resize)
+            c.bind("<MouseWheel>", lambda e, cv=c: self._on_mousewheel(e, cv))
+            c.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
+            c.bind("<Double-Button-1>", lambda e, cv=c: self._on_double_click(e, cv))
 
         # Bottom bar
         bottom = tk.Frame(self.root)
@@ -116,6 +139,27 @@ class ImageSorterApp:
 
         self.btn_cancel = tk.Button(bottom, text="キャンセル", command=self._cancel_loading)
         # 初期状態では非表示（読み込み中のみpack）
+
+    # ── Split toggle ─────────────────────────────────────────
+
+    def _toggle_split(self):
+        self._split_mode = not self._split_mode
+        if self._split_mode:
+            self._divider.pack(side=tk.LEFT, fill=tk.Y, padx=1)
+            self._panel_r.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            self.btn_split.config(text="統合")
+        else:
+            self._panel_r.pack_forget()
+            self._divider.pack_forget()
+            self.btn_split.config(text="分割")
+        if not self._loading:
+            self._draw_grid()
+
+    def _visible_canvases(self):
+        """現在表示中のキャンバスのリストを返す"""
+        if self._split_mode:
+            return [self.canvas, self.canvas_r]
+        return [self.canvas]
 
     # ── Folder D&D from Explorer ──────────────────────────────
 
@@ -185,6 +229,7 @@ class ImageSorterApp:
             self.btn_rename.config(state=tk.DISABLED)
             self._finish_loading()
             self.canvas.delete("all")
+            self.canvas_r.delete("all")
             return
 
         if self._load_index >= len(self._load_queue):
@@ -257,66 +302,77 @@ class ImageSorterApp:
 
     # ── Grid drawing ────────────────────────────────────────
 
-    def _calc_columns(self):
-        w = self.canvas.winfo_width()
+    def _calc_columns(self, canvas=None):
+        if canvas is None:
+            canvas = self.canvas
+        w = canvas.winfo_width()
         cell = self._thumb_size + CELL_PADDING * 2
         return max(1, w // cell)
 
     def _draw_grid(self):
-        self.canvas.delete("all")
+        for c in self._visible_canvases():
+            self._draw_grid_on(c)
+
+    def _draw_grid_on(self, canvas):
+        canvas.delete("all")
         if not self.images:
-            self.canvas.config(scrollregion=(0, 0, 0, 0))
+            canvas.config(scrollregion=(0, 0, 0, 0))
             return
 
         ts = self._thumb_size
-        cols = self._calc_columns()
+        cols = self._calc_columns(canvas)
         cell_w = ts + CELL_PADDING * 2
         cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
+        show_marker = (canvas is self._active_canvas) or not self._split_mode
 
         for i, item in enumerate(self.images):
             row, col = divmod(i, cols)
             x = col * cell_w + CELL_PADDING + ts // 2
             y = row * cell_h + CELL_PADDING + ts // 2
 
-            self.canvas.create_image(x, y, image=item["thumb"], tags=(f"img_{i}", "thumb"))
-            self.canvas.create_text(
+            tag_prefix = "L" if canvas is self.canvas else "R"
+            canvas.create_image(x, y, image=item["thumb"],
+                                tags=(f"{tag_prefix}_img_{i}", "thumb"))
+            canvas.create_text(
                 x, y + ts // 2 + 4,
                 text=item["name"], fill="white", font=("Consolas", 9),
-                tags=(f"lbl_{i}", "label"),
+                tags=(f"{tag_prefix}_lbl_{i}", "label"),
             )
 
             # Draw insert marker if dragging
-            if self.insert_index is not None and i == self.insert_index and i != self.drag_index:
+            if show_marker and self.insert_index is not None and i == self.insert_index and i != self.drag_index:
                 mx = col * cell_w + 1
                 my = row * cell_h + CELL_PADDING
-                self.canvas.create_line(
+                canvas.create_line(
                     mx, my, mx, my + ts,
                     fill="#00bfff", width=3, tags="marker",
                 )
 
         # Insert marker at end
-        if self.insert_index is not None and self.insert_index == len(self.images):
+        if show_marker and self.insert_index is not None and self.insert_index == len(self.images):
             i_end = len(self.images)
             row, col = divmod(i_end, cols)
             mx = col * cell_w + 1
             my = row * cell_h + CELL_PADDING
-            self.canvas.create_line(
+            canvas.create_line(
                 mx, my, mx, my + ts,
                 fill="#00bfff", width=3, tags="marker",
             )
 
         total_rows = (len(self.images) + cols - 1) // cols
         total_h = total_rows * cell_h + CELL_PADDING
-        self.canvas.config(scrollregion=(0, 0, cols * cell_w, total_h))
+        canvas.config(scrollregion=(0, 0, cols * cell_w, total_h))
 
     def _on_canvas_resize(self, event):
         if not self._loading:
             self._draw_grid()
 
-    def _on_mousewheel(self, event):
+    def _on_mousewheel(self, event, canvas=None):
+        if canvas is None:
+            canvas = self.canvas
         if event.state & 0x4:  # Ctrl held
             return
-        self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def _on_ctrl_mousewheel(self, event):
         if self._loading or not self.images:
@@ -334,10 +390,10 @@ class ImageSorterApp:
 
     # ── Drag & Drop ─────────────────────────────────────────
 
-    def _hit_index(self, x, y):
+    def _hit_index(self, canvas, x, y):
         """canvas座標からグリッドインデックスを返す"""
         ts = self._thumb_size
-        cols = self._calc_columns()
+        cols = self._calc_columns(canvas)
         cell_w = ts + CELL_PADDING * 2
         cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
 
@@ -349,10 +405,10 @@ class ImageSorterApp:
             return idx
         return None
 
-    def _insert_position(self, x, y):
+    def _insert_position(self, canvas, x, y):
         """ドロップ位置から挿入インデックスを算出"""
         ts = self._thumb_size
-        cols = self._calc_columns()
+        cols = self._calc_columns(canvas)
         cell_w = ts + CELL_PADDING * 2
         cell_h = ts + CELL_PADDING * 2 + LABEL_HEIGHT
 
@@ -368,50 +424,90 @@ class ImageSorterApp:
 
         return max(0, min(idx, len(self.images)))
 
-    def _on_press(self, event):
+    def _get_canvas_at(self, x_root, y_root):
+        """スクリーン座標からマウス下のキャンバスを返す"""
+        for c in self._visible_canvases():
+            cx = c.winfo_rootx()
+            cy = c.winfo_rooty()
+            cw = c.winfo_width()
+            ch = c.winfo_height()
+            if cx <= x_root < cx + cw and cy <= y_root < cy + ch:
+                return c
+        return None
+
+    def _screen_to_canvas_coords(self, canvas, x_root, y_root):
+        """スクリーン座標をキャンバスのスクロール補正済み座標に変換"""
+        local_x = x_root - canvas.winfo_rootx()
+        local_y = y_root - canvas.winfo_rooty()
+        return canvas.canvasx(local_x), canvas.canvasy(local_y)
+
+    def _on_press(self, event, canvas=None):
+        if canvas is None:
+            canvas = self.canvas
         if not self.images or self._loading:
             return
-        cx = self.canvas.canvasx(event.x)
-        cy = self.canvas.canvasy(event.y)
-        idx = self._hit_index(cx, cy)
+        cx = canvas.canvasx(event.x)
+        cy = canvas.canvasy(event.y)
+        idx = self._hit_index(canvas, cx, cy)
         if idx is not None:
             self.drag_index = idx
+            self._drag_canvas = canvas
+            self._active_canvas = canvas
             # Create ghost overlay
             item = self.images[idx]
-            self.drag_ghost = self.canvas.create_image(
+            self.drag_ghost = canvas.create_image(
                 cx, cy, image=item["thumb"], tags="ghost"
             )
-            self.canvas.itemconfigure(self.drag_ghost, state=tk.NORMAL)
+            canvas.itemconfigure(self.drag_ghost, state=tk.NORMAL)
             # Dim the original
-            self.canvas.itemconfigure(f"img_{idx}", state=tk.HIDDEN)
+            tag_prefix = "L" if canvas is self.canvas else "R"
+            canvas.itemconfigure(f"{tag_prefix}_img_{idx}", state=tk.HIDDEN)
 
     def _on_drag(self, event):
         if self.drag_index is None:
             return
-        cx = self.canvas.canvasx(event.x)
-        cy = self.canvas.canvasy(event.y)
+
+        # イベントはドラッグ開始キャンバスに届くが、マウスは別キャンバス上の可能性がある
+        current_canvas = self._get_canvas_at(event.x_root, event.y_root)
+        if current_canvas is None:
+            current_canvas = self._active_canvas or self._drag_canvas
+
+        cx, cy = self._screen_to_canvas_coords(current_canvas, event.x_root, event.y_root)
+
+        # キャンバスが変わった場合、ゴーストを移動先に再生成
+        if current_canvas is not self._active_canvas:
+            # 旧キャンバスのゴーストを削除
+            if self._active_canvas and self.drag_ghost:
+                self._active_canvas.delete("ghost")
+            self._active_canvas = current_canvas
+            # 新キャンバスにゴーストを再生成
+            item = self.images[self.drag_index]
+            self.drag_ghost = current_canvas.create_image(
+                cx, cy, image=item["thumb"], tags="ghost"
+            )
 
         # Move ghost
         if self.drag_ghost:
-            self.canvas.coords(self.drag_ghost, cx, cy)
+            current_canvas.coords(self.drag_ghost, cx, cy)
 
         # Update insert marker
-        new_insert = self._insert_position(cx, cy)
+        new_insert = self._insert_position(current_canvas, cx, cy)
         if new_insert != self.insert_index:
             self.insert_index = new_insert
             self._draw_grid()
             # Re-create ghost on top after redraw
             item = self.images[self.drag_index]
-            self.drag_ghost = self.canvas.create_image(
+            self.drag_ghost = current_canvas.create_image(
                 cx, cy, image=item["thumb"], tags="ghost"
             )
 
         # 自動スクロール判定
-        self._check_auto_scroll(event.y)
+        local_y = event.y_root - current_canvas.winfo_rooty()
+        self._check_auto_scroll(current_canvas, local_y)
 
-    def _check_auto_scroll(self, widget_y):
+    def _check_auto_scroll(self, canvas, widget_y):
         """ウィンドウ座標でエッジ判定し、自動スクロールを開始/停止"""
-        canvas_h = self.canvas.winfo_height()
+        canvas_h = canvas.winfo_height()
 
         if widget_y < AUTO_SCROLL_ZONE:
             # 上端付近 → 上方向スクロール
@@ -437,7 +533,8 @@ class ImageSorterApp:
             self._cancel_auto_scroll()
             return
 
-        self.canvas.yview_scroll(self._scroll_direction * self._scroll_speed, "units")
+        canvas = self._active_canvas or self.canvas
+        canvas.yview_scroll(self._scroll_direction * self._scroll_speed, "units")
         self._auto_scroll_after_id = self.root.after(
             AUTO_SCROLL_INTERVAL, self._auto_scroll_tick
         )
@@ -466,16 +563,20 @@ class ImageSorterApp:
         self.drag_index = None
         self.insert_index = None
         self.drag_ghost = None
+        self._active_canvas = None
+        self._drag_canvas = None
         self._draw_grid()
 
     # ── Image Viewer ─────────────────────────────────────────
 
-    def _on_double_click(self, event):
+    def _on_double_click(self, event, canvas=None):
+        if canvas is None:
+            canvas = self.canvas
         if not self.images or self._loading:
             return
-        cx = self.canvas.canvasx(event.x)
-        cy = self.canvas.canvasy(event.y)
-        idx = self._hit_index(cx, cy)
+        cx = canvas.canvasx(event.x)
+        cy = canvas.canvasy(event.y)
+        idx = self._hit_index(canvas, cx, cy)
         if idx is not None:
             self._open_viewer(idx)
 
