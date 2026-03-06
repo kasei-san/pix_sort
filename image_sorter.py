@@ -771,8 +771,9 @@ class ImageSorterApp:
         item = self.images[index]
         name = item["name"]
         path = item["path"]
+        path = os.path.normpath(path)
         logging.info("Delete requested: index=%d, name=%s, path=%r", index, name, path)
-        logging.info("  exists=%s, abspath=%r", os.path.exists(path), os.path.abspath(path))
+        logging.info("  exists=%s", os.path.exists(path))
         if not messagebox.askyesno("確認", f"「{name}」をごみ箱に移動するのだ。\nよろしいのだ？"):
             return
         try:
