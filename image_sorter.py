@@ -9,6 +9,7 @@ import os
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
+from send2trash import send2trash
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk
 
@@ -250,6 +251,7 @@ class ImageSorterApp:
             c.bind("<MouseWheel>", lambda e, cv=c: self._on_mousewheel(e, cv))
             c.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
             c.bind("<Double-Button-1>", lambda e, cv=c: self._on_double_click(e, cv))
+            c.bind("<Button-3>", lambda e, cv=c: self._on_right_click(e, cv))
 
         # Bottom bar
         bottom = tk.Frame(self.root)
@@ -735,6 +737,39 @@ class ImageSorterApp:
         self.drag_ghost = None
         self._active_canvas = None
         self._drag_canvas = None
+        self._draw_grid()
+
+    # ── Context Menu ─────────────────────────────────────────
+
+    def _on_right_click(self, event, canvas=None):
+        if canvas is None:
+            canvas = self.canvas
+        if not self.images or self._loading:
+            return
+        cx = canvas.canvasx(event.x)
+        cy = canvas.canvasy(event.y)
+        idx = self._hit_index(canvas, cx, cy)
+        if idx is None:
+            return
+
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="削除", command=lambda: self._delete_image(idx))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_image(self, index):
+        if not (0 <= index < len(self.images)):
+            return
+        item = self.images[index]
+        name = item["name"]
+        if not messagebox.askyesno("確認", f"「{name}」をごみ箱に移動するのだ。\nよろしいのだ？"):
+            return
+        try:
+            send2trash(item["path"])
+        except Exception as e:
+            messagebox.showerror("エラー", f"削除に失敗したのだ。\n{e}")
+            return
+        self.images.pop(index)
+        self.btn_rename.config(state=tk.NORMAL if self.images else tk.DISABLED)
         self._draw_grid()
 
     # ── Image Viewer ─────────────────────────────────────────
