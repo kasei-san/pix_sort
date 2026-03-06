@@ -209,6 +209,12 @@ class ImageSorterApp:
         self.btn_split = tk.Button(top, text="分割", command=self._toggle_split)
         self.btn_split.pack(side=tk.RIGHT)
 
+        self.btn_zoom_in = tk.Button(top, text="＋", width=2, command=self._zoom_in)
+        self.btn_zoom_in.pack(side=tk.RIGHT, padx=(0, 4))
+
+        self.btn_zoom_out = tk.Button(top, text="－", width=2, command=self._zoom_out)
+        self.btn_zoom_out.pack(side=tk.RIGHT, padx=(0, 2))
+
         # Scrollable canvas area
         mid = tk.Frame(self.root)
         mid.pack(fill=tk.BOTH, expand=True, padx=8)
@@ -530,15 +536,27 @@ class ImageSorterApp:
         if self._loading or not self.images:
             return
         if event.delta > 0:
-            new_idx = min(self._thumb_size_idx + 1, len(THUMB_SIZES) - 1)
+            self._zoom_in()
         else:
-            new_idx = max(self._thumb_size_idx - 1, 0)
+            self._zoom_out()
+
+    def _change_thumb_size(self, new_idx):
         if new_idx == self._thumb_size_idx:
             return
         self._thumb_size_idx = new_idx
         for item in self.images:
             item["thumb"] = item["thumbs"][self._thumb_size_idx]
         self._draw_grid()
+
+    def _zoom_in(self):
+        if self._loading or not self.images:
+            return
+        self._change_thumb_size(min(self._thumb_size_idx + 1, len(THUMB_SIZES) - 1))
+
+    def _zoom_out(self):
+        if self._loading or not self.images:
+            return
+        self._change_thumb_size(max(self._thumb_size_idx - 1, 0))
 
     # ── Drag & Drop ─────────────────────────────────────────
 
