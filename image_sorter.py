@@ -774,8 +774,6 @@ class ImageSorterApp:
         path = os.path.normpath(path)
         logging.info("Delete requested: index=%d, name=%s, path=%r", index, name, path)
         logging.info("  exists=%s", os.path.exists(path))
-        if not messagebox.askyesno("確認", f"「{name}」をごみ箱に移動するのだ。\nよろしいのだ？"):
-            return
         try:
             send2trash(path)
         except Exception as e:
