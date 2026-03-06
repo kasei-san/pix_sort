@@ -5,6 +5,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,14 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 CACHE_MAX_BYTES = 200 * 1024 * 1024  # 200MB
 POLL_INTERVAL_MS = 16  # ~60fps ポーリング
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixsort.log")
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    encoding="utf-8",
+)
 
 
 def _cache_key(abs_path, mtime, file_size):
@@ -761,13 +770,18 @@ class ImageSorterApp:
             return
         item = self.images[index]
         name = item["name"]
+        path = item["path"]
+        logging.info("Delete requested: index=%d, name=%s, path=%r", index, name, path)
+        logging.info("  exists=%s, abspath=%r", os.path.exists(path), os.path.abspath(path))
         if not messagebox.askyesno("確認", f"「{name}」をごみ箱に移動するのだ。\nよろしいのだ？"):
             return
         try:
-            send2trash(item["path"])
+            send2trash(path)
         except Exception as e:
+            logging.exception("send2trash failed for path=%r", path)
             messagebox.showerror("エラー", f"削除に失敗したのだ。\n{e}")
             return
+        logging.info("Deleted successfully: %s", name)
         self.images.pop(index)
         self.btn_rename.config(state=tk.NORMAL if self.images else tk.DISABLED)
         self._draw_grid()
