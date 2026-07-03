@@ -27,8 +27,11 @@ AI画像生成のワークフローで、生成した画像を好みの順番に
 
 ## インストール
 
+初回のみ `setup.bat` をダブルクリックしてvenvを作成し、依存パッケージをインストールする。
+
 ```bash
-pip install Pillow tkinterdnd2
+py -3.10 -m venv venv
+venv\Scripts\pip install -r requirements.txt
 ```
 
 ## 起動方法
@@ -36,7 +39,7 @@ pip install Pillow tkinterdnd2
 `image_sorter.bat` をダブルクリック、または：
 
 ```bash
-python image_sorter.py
+venv\Scripts\python image_sorter.py
 ```
 
 ## 使い方
@@ -74,8 +77,11 @@ python image_sorter.py
 pix_sort/
 ├── image_sorter.py    # メインアプリ
 ├── image_sorter.bat   # 起動用バッチ
+├── setup.bat          # 初回セットアップ用バッチ（venv作成）
+├── requirements.txt   # 依存パッケージ一覧
 ├── config.json        # 設定（自動生成、前回フォルダを記憶）
 ├── cache/             # サムネイルキャッシュ（自動生成）
+├── venv/              # 仮想環境（setup.batで自動生成）
 └── doc/
     └── SPEC.md        # 詳細仕様書
 ```
