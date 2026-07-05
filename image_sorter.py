@@ -575,10 +575,15 @@ class ImageSorterApp:
         self._change_thumb_size(max(self._thumb_size_idx - 1, 0))
 
     def _sort_by_creation_date(self):
-        """ファイル生成日時の昇順（新しい方が下）でソートする"""
+        """ファイル更新日時の昇順（新しい方が下）でソートする
+
+        getctime（作成日時）はOneDriveなどの同期フォルダで
+        再同期のたびに現在時刻へリセットされ信頼できないため、
+        getmtime（更新日時）を使用する。
+        """
         if self._loading or not self.images:
             return
-        self.images.sort(key=lambda item: os.path.getctime(item["path"]))
+        self.images.sort(key=lambda item: os.path.getmtime(item["path"]))
         self._draw_grid()
 
     # ── Drag & Drop ─────────────────────────────────────────
