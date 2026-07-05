@@ -219,6 +219,11 @@ class ImageSorterApp:
         self.btn_split = tk.Button(top, text="分割", command=self._toggle_split)
         self.btn_split.pack(side=tk.RIGHT)
 
+        self.btn_sort_date = tk.Button(
+            top, text="生成日順(新しい方が下)", command=self._sort_by_creation_date
+        )
+        self.btn_sort_date.pack(side=tk.RIGHT, padx=(0, 4))
+
         self.btn_zoom_in = tk.Button(top, text="＋", width=2, command=self._zoom_in)
         self.btn_zoom_in.pack(side=tk.RIGHT, padx=(0, 4))
 
@@ -568,6 +573,13 @@ class ImageSorterApp:
         if self._loading or not self.images:
             return
         self._change_thumb_size(max(self._thumb_size_idx - 1, 0))
+
+    def _sort_by_creation_date(self):
+        """ファイル生成日時の昇順（新しい方が下）でソートする"""
+        if self._loading or not self.images:
+            return
+        self.images.sort(key=lambda item: os.path.getctime(item["path"]))
+        self._draw_grid()
 
     # ── Drag & Drop ─────────────────────────────────────────
 
