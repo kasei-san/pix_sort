@@ -1,6 +1,6 @@
 """PixSort — 画像並び替え＆リネームツール
 
-ディレクトリ内のPNG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
+ディレクトリ内のPNG/JPG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
 """
 
 import hashlib
@@ -338,7 +338,7 @@ class ImageSorterApp:
         self.images.clear()
         files = sorted(
             f for f in os.listdir(self.directory)
-            if f.lower().endswith(".png")
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
         )
 
         if not files:
@@ -912,7 +912,8 @@ class ImageSorterApp:
         temp_map = []
         for i, item in enumerate(self.images):
             old = item["path"]
-            temp_name = f"__temp_{i:06d}.png"
+            ext = os.path.splitext(old)[1]
+            temp_name = f"__temp_{i:06d}{ext}"
             temp_path = os.path.join(self.directory, temp_name)
             os.rename(old, temp_path)
             temp_map.append(temp_path)
@@ -920,7 +921,8 @@ class ImageSorterApp:
         # Phase 2: rename to final names
         for i, temp_path in enumerate(temp_map):
             num = (i + 1) * 10
-            new_name = f"{str(num).zfill(digits)}.png"
+            ext = os.path.splitext(temp_path)[1]
+            new_name = f"{str(num).zfill(digits)}{ext}"
             new_path = os.path.join(self.directory, new_name)
             os.rename(temp_path, new_path)
             self.images[i]["path"] = new_path
