@@ -1,6 +1,6 @@
 """PixSort — 画像並び替え＆リネームツール
 
-ディレクトリ内のPNG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
+ディレクトリ内のPNG/JPG画像をD&Dで並び替え、連番(010, 020, 030...)でリネームする。
 """
 
 import hashlib
@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tkinter import filedialog, messagebox
 from send2trash import send2trash
 from tkinterdnd2 import DND_FILES, TkinterDnD
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 
 THUMB_SIZES = (80, 150, 250)  # 小・中・大
 THUMB_SIZE_DEFAULT_INDEX = 1  # 中（150）
@@ -121,6 +121,7 @@ def _process_image_worker(path, thumb_sizes, cache_dir):
             try:
                 source_img = Image.open(path)
                 source_img.load()
+                source_img = ImageOps.exif_transpose(source_img)
             except Exception:
                 source_img = False  # 読み込み失敗フラグ
 
@@ -338,7 +339,7 @@ class ImageSorterApp:
         self.images.clear()
         files = sorted(
             f for f in os.listdir(self.directory)
-            if f.lower().endswith(".png")
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
         )
 
         if not files:
@@ -847,6 +848,7 @@ class ImageSorterApp:
 
         try:
             img = Image.open(path)
+            img = ImageOps.exif_transpose(img)
         except Exception:
             return
 
@@ -912,15 +914,16 @@ class ImageSorterApp:
         temp_map = []
         for i, item in enumerate(self.images):
             old = item["path"]
-            temp_name = f"__temp_{i:06d}.png"
+            ext = os.path.splitext(old)[1].lower()
+            temp_name = f"__temp_{i:06d}{ext}"
             temp_path = os.path.join(self.directory, temp_name)
             os.rename(old, temp_path)
-            temp_map.append(temp_path)
+            temp_map.append((temp_path, ext))
 
         # Phase 2: rename to final names
-        for i, temp_path in enumerate(temp_map):
+        for i, (temp_path, ext) in enumerate(temp_map):
             num = (i + 1) * 10
-            new_name = f"{str(num).zfill(digits)}.png"
+            new_name = f"{str(num).zfill(digits)}{ext}"
             new_path = os.path.join(self.directory, new_name)
             os.rename(temp_path, new_path)
             self.images[i]["path"] = new_path
