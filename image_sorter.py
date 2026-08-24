@@ -25,6 +25,7 @@ CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 CACHE_MAX_BYTES = 200 * 1024 * 1024  # 200MB
 POLL_INTERVAL_MS = 16  # ~60fps ポーリング
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pixsort.log")
+VIEWER_BAR_HEIGHT = 40  # ビューアの削除ボタンバーの高さ
 
 logging.basicConfig(
     filename=LOG_PATH,
@@ -832,6 +833,12 @@ class ImageSorterApp:
         self._viewer_photo = None  # 参照保持用
 
         self._viewer_canvas = tk.Canvas(win, bg="#000000", highlightthickness=0)
+
+        bar = tk.Frame(win, bg="#1a1a1a")
+        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        self.btn_viewer_delete = tk.Button(bar, text="削除", command=self._viewer_delete_current)
+        self.btn_viewer_delete.pack(pady=6)
+
         self._viewer_canvas.pack(fill=tk.BOTH, expand=True)
 
         win.bind("<Key>", self._viewer_on_key)
@@ -868,7 +875,7 @@ class ImageSorterApp:
         self._viewer_photo = ImageTk.PhotoImage(img)
 
         win = self._viewer_win
-        win.geometry(f"{new_w}x{new_h}")
+        win.geometry(f"{new_w}x{new_h + VIEWER_BAR_HEIGHT}")
         win.title(f"PixSort — {self.images[index]['name']}")
 
         self._viewer_canvas.delete("all")
@@ -891,6 +898,16 @@ class ImageSorterApp:
             self._viewer_win.destroy()
             self._viewer_win = None
             self._viewer_photo = None
+
+    def _viewer_delete_current(self):
+        index = self._viewer_index
+        if not (0 <= index < len(self.images)):
+            return
+        self._delete_image(index)
+        if not self.images:
+            self._close_viewer()
+            return
+        self._viewer_show_image(min(index, len(self.images) - 1))
 
     # ── Rename ──────────────────────────────────────────────
 
