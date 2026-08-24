@@ -861,7 +861,7 @@ class ImageSorterApp:
 
         # 画面サイズに収まるようリサイズ
         screen_w = self.root.winfo_screenwidth() - 80
-        screen_h = self.root.winfo_screenheight() - 120
+        screen_h = self.root.winfo_screenheight() - 120 - VIEWER_BAR_HEIGHT
         img_w, img_h = img.size
 
         if img_w > screen_w or img_h > screen_h:
@@ -908,6 +908,8 @@ class ImageSorterApp:
             self._close_viewer()
             return
         self._viewer_show_image(min(index, len(self.images) - 1))
+        # ボタン起動後もフォーカスがボタンに残ると次のSpace/Enterで誤って再削除されるため戻す
+        self._viewer_canvas.focus_set()
 
     # ── Rename ──────────────────────────────────────────────
 
